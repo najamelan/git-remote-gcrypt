@@ -31,6 +31,7 @@ Manifestfile=91bd0c092128cf2e60e1a608c31e92caf1f9c1595f83f2890ef17c0e4881aa0a
 Hex40="[a-f0-9]"
 Hex40=$Hex40$Hex40$Hex40$Hex40$Hex40$Hex40$Hex40$Hex40
 Hex40=$Hex40$Hex40$Hex40$Hex40$Hex40 # Match SHA-1 hexdigest
+DefaultKeyring='(default keyring)'
 
 Did_find_repo=  # yes for connected, no for no repo
 Localdir="${GIT_DIR:=.git}/remote-gcrypt"
@@ -336,12 +337,12 @@ PRIVENCRYPT()
 	gpg --compress-algo none --trust-model=always -se "$@"
 }
 
-# $1 is the match for good signature, $2 is the textual signers list
+# $1 is the match for good signature, $2 is the textual signers list, $3 = keyring options
 PRIVDECRYPT()
 {
 	local status_=
 	exec 4>&1 &&
-	status_=$(gpg  --status-fd 3 -q -d 3>&1 1>&4) &&
+	status_=$(gpg  --status-fd 3 -q -d $3 3>&1 1>&4) &&
 	xfeed "$status_" grep "^\[GNUPG:\] ENC_TO " >/dev/null &&
 	(xfeed "$status_" grep -e "$1" >/dev/null || {
 		echo_info "Failed to verify manifest signature!" &&
@@ -397,7 +398,7 @@ read_config()
 	# Figure out which keys we should encrypt to or accept signatures from
 	if isnull "$conf_part" || iseq "$conf_part" simple
 	then
-		signers_="(default keyring)"
+		signers_="$DefaultKeyring"
 		Recipients="--throw-keyids --default-recipient-self"
 		good_sig="^\[GNUPG:\] GOODSIG "
 		setvar "$1" "$good_sig"
@@ -445,7 +446,7 @@ read_config()
 ensure_connected()
 {
 	local manifest_= r_repoid= r_name= url_frag= r_sigmatch= r_signers= \
-		tmp_manifest=
+		tmp_manifest= keyring_options=
 
 	if isnonnull "$Did_find_repo"
 	then
@@ -489,9 +490,24 @@ ensure_connected()
 
 	Did_find_repo=yes
 	echo_info "Decrypting manifest"
-	manifest_=$(PRIVDECRYPT "$r_sigmatch" "$r_signers" < "$tmp_manifest") &&
-		isnonnull "$manifest_" ||
-		echo_die "Failed to decrypt manifest!"
+
+	# if participants is set, try only those keys first
+	# avoids gpg prompting for the whole keyring
+	if isnoteq "$r_signers" "$DefaultKeyring" || isnonnull "$Conf_signkey"
+	then
+		gpg --export-secret-keys "$Conf_signkey $r_signers" >| "$Tempdir"/seckeyring.gpg
+		keyring_options="--no-default-keyring --secret-keyring $Tempdir/seckeyring.gpg"
+		manifest_=$(PRIVDECRYPT "$r_sigmatch" "$r_signers" "$keyring_options" < "$tmp_manifest")
+		rm -f "$Tempdir"/$$keyring.gpg
+	fi
+
+	if isnull "$manifest_"
+	then
+		echo_info "Decryption failed with only the participant keys, trying entire keyring"
+		manifest_=$(PRIVDECRYPT "$r_sigmatch" "$r_signers" "" < "$tmp_manifest")
+	fi
+
+	isnonnull "$manifest_" || echo_die "Failed to decrypt manifest!"
 	rm -f "$tmp_manifest"
 
 	filter_to @Refslist "$Hex40 *" "$manifest_"
